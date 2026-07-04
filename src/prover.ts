@@ -29,6 +29,18 @@ const G2 = bn254.G2;
 type G1Point = ReturnType<typeof G1.ProjectivePoint.fromHex>;
 type G2Point = ReturnType<typeof G2.ProjectivePoint.fromHex>;
 
+/** Safely multiply a G1 point by a scalar, handling 0n */
+function safeG1Multiply(scalar: bigint): G1Point {
+  if (scalar === 0n) return G1.ProjectivePoint.ZERO;
+  return G1.ProjectivePoint.BASE.multiply(scalar);
+}
+
+/** Safely multiply a G2 point by a scalar, handling 0n */
+function safeG2Multiply(scalar: bigint): G2Point {
+  if (scalar === 0n) return G2.ProjectivePoint.ZERO;
+  return G2.ProjectivePoint.BASE.multiply(scalar);
+}
+
 /** Generate a random field element */
 function randomFieldElement(): bigint {
   const bytes = new Uint8Array(32);
@@ -56,10 +68,11 @@ export interface ProvingKey {
   deltaG1: G1Point;
   /** delta in G2 for verification */
   deltaG2: G2Point;
-  /** Toxic waste parameters encoded as points */
+  /** Toxic waste parameters (in a real system these would be destroyed) */
   toxicAlpha: bigint;
   toxicBeta: bigint;
   toxicDelta: bigint;
+  toxicTau: bigint;
 }
 
 export interface VerificationKey {
@@ -149,7 +162,7 @@ export function trustedSetup(r1cs: R1CS): SetupResult {
   const ic: G1Point[] = [];
   for (let i = 0; i < numPublic; i++) {
     const scalar = Fr.mul(uWire[i], gammaInv);
-    ic.push(G1.ProjectivePoint.BASE.multiply(scalar));
+    ic.push(safeG1Multiply(scalar));
   }
 
   // Per-wire G1 points for proving key
@@ -158,10 +171,10 @@ export function trustedSetup(r1cs: R1CS): SetupResult {
     // For private wires: (u_i / delta) * G1
     // For public wires: stored in IC
     if (i < numPublic) {
-      alphaG1Points.push(G1.ProjectivePoint.BASE.multiply(uWire[i]));
+      alphaG1Points.push(safeG1Multiply(uWire[i]));
     } else {
       const scalar = Fr.mul(uWire[i], deltaInv);
-      alphaG1Points.push(G1.ProjectivePoint.BASE.multiply(scalar));
+      alphaG1Points.push(safeG1Multiply(scalar));
     }
   }
 
@@ -169,24 +182,25 @@ export function trustedSetup(r1cs: R1CS): SetupResult {
   const betaG2Points: G2Point[] = [];
   for (let i = 0; i < numWires; i++) {
     const scalar = Fr.mul(beta, Fr.pow(tau, BigInt(i + 1)));
-    betaG2Points.push(G2.ProjectivePoint.BASE.multiply(scalar));
+    betaG2Points.push(safeG2Multiply(scalar));
   }
 
   const provingKey: ProvingKey = {
     alphaG1: alphaG1Points,
     betaG2: betaG2Points,
-    deltaG1: G1.ProjectivePoint.BASE.multiply(delta),
-    deltaG2: G2.ProjectivePoint.BASE.multiply(delta),
+    deltaG1: safeG1Multiply(delta),
+    deltaG2: safeG2Multiply(delta),
     toxicAlpha: alpha,
     toxicBeta: beta,
     toxicDelta: delta,
+    toxicTau: tau,
   };
 
   const verificationKey: VerificationKey = {
-    alphaG1: G1.ProjectivePoint.BASE.multiply(alpha),
-    betaG2: G2.ProjectivePoint.BASE.multiply(beta),
-    deltaG2: G2.ProjectivePoint.BASE.multiply(delta),
-    gammaG2: G2.ProjectivePoint.BASE.multiply(gamma),
+    alphaG1: safeG1Multiply(alpha),
+    betaG2: safeG2Multiply(beta),
+    deltaG2: safeG2Multiply(delta),
+    gammaG2: safeG2Multiply(gamma),
     ic,
   };
 
@@ -210,16 +224,18 @@ export function prove(
 
   const numPublic = 1 + r1cs.numPublicInputs;
 
-  // Compute A, B, C from witness and R1CS
-  // For each constraint: A_val = sum(a_ij * w_j), B_val = sum(b_ij * w_j)
+  // Compute tau-weighted A, B sums from witness and R1CS
+  // Must match the trusted setup's tau-weighted evaluation
   let sumA = 0n;
   let sumB = 0n;
 
-  for (const constraint of r1cs.constraints) {
+  for (let ci = 0; ci < r1cs.constraints.length; ci++) {
+    const tauPow = Fr.pow(provingKey.toxicTau, BigInt(ci + 1));
+    const constraint = r1cs.constraints[ci];
     const aVal = evalSparse(constraint.a, witness, FIELD_ORDER);
     const bVal = evalSparse(constraint.b, witness, FIELD_ORDER);
-    sumA = Fr.add(sumA, aVal);
-    sumB = Fr.add(sumB, bVal);
+    sumA = Fr.add(sumA, Fr.mul(aVal, tauPow));
+    sumB = Fr.add(sumB, Fr.mul(bVal, tauPow));
   }
 
   // pi_A = alpha + sum(a_i * w_i) + r * delta  (in G1)
@@ -227,14 +243,14 @@ export function prove(
     Fr.add(provingKey.toxicAlpha, sumA),
     Fr.mul(r, provingKey.toxicDelta)
   );
-  const piA = G1.ProjectivePoint.BASE.multiply(piAScalar);
+  const piA = safeG1Multiply(piAScalar);
 
   // pi_B = beta + sum(b_i * w_i) + s * delta  (in G2)
   const piBScalar = Fr.add(
     Fr.add(provingKey.toxicBeta, sumB),
     Fr.mul(s, provingKey.toxicDelta)
   );
-  const piB = G2.ProjectivePoint.BASE.multiply(piBScalar);
+  const piB = safeG2Multiply(piBScalar);
 
   // pi_C encodes the private wire contributions + blinding
   // C = sum_{private wires} (w_i * u_i / delta) * G1 + s * A + r * B - r * s * delta
@@ -261,26 +277,28 @@ export function prove(
   // => piC_scalar = (piA_scalar * piB_scalar - alpha*beta - publicContrib) / delta
 
   // Compute public input contribution scalar
-  // This uses the same IC computation as the verifier
+  // This must match the trusted setup's u_i computation (tau-weighted)
   let publicContrib = 0n;
   for (let i = 0; i < numPublic; i++) {
-    // We need u_i values; recompute from R1CS
+    // Recompute u_i = beta * a_i(tau) + alpha * b_i(tau) + c_i(tau)
+    // where a_i(tau) = sum over constraints ci of (coeff for wire i in A_ci) * tau^(ci+1)
     let uI = 0n;
     for (let ci = 0; ci < r1cs.constraints.length; ci++) {
+      const tauPow = Fr.pow(provingKey.toxicTau, BigInt(ci + 1));
       const constraint = r1cs.constraints[ci];
       for (const [idx, coeff] of constraint.a) {
         if (idx === i) {
-          uI = Fr.add(uI, Fr.mul(provingKey.toxicBeta, coeff));
+          uI = Fr.add(uI, Fr.mul(provingKey.toxicBeta, Fr.mul(coeff, tauPow)));
         }
       }
       for (const [idx, coeff] of constraint.b) {
         if (idx === i) {
-          uI = Fr.add(uI, Fr.mul(provingKey.toxicAlpha, coeff));
+          uI = Fr.add(uI, Fr.mul(provingKey.toxicAlpha, Fr.mul(coeff, tauPow)));
         }
       }
       for (const [idx, coeff] of constraint.c) {
         if (idx === i) {
-          uI = Fr.add(uI, coeff);
+          uI = Fr.add(uI, Fr.mul(coeff, tauPow));
         }
       }
     }
@@ -293,7 +311,7 @@ export function prove(
     deltaInv
   );
 
-  const piC = G1.ProjectivePoint.BASE.multiply(piCScalar);
+  const piC = safeG1Multiply(piCScalar);
 
   return { piA, piB, piC };
 }

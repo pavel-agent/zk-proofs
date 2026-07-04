@@ -93,9 +93,9 @@ function runDemo(aStr: string, bStr: string): void {
   console.log(`  Proof generated in ${proveTime}ms`);
 
   const serialized = serializeProof(proof);
-  console.log(`  piA: ${serialized.piA.slice(0, 32)}...`);
-  console.log(`  piB: ${serialized.piB.slice(0, 32)}...`);
-  console.log(`  piC: ${serialized.piC.slice(0, 32)}...`);
+  console.log(`  piA: (${serialized.piA.x.slice(0, 20)}..., ${serialized.piA.y.slice(0, 20)}...)`);
+  console.log(`  piB: (${serialized.piB.x.c0.slice(0, 20)}..., ...)`);
+  console.log(`  piC: (${serialized.piC.x.slice(0, 20)}..., ${serialized.piC.y.slice(0, 20)}...)`);
 
   // Step 6: Verify proof
   console.log("\nStep 6: Verifying proof...");

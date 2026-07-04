@@ -70,46 +70,76 @@ export function verify(
   }
 }
 
+/** Serialized representation of a G1 affine point */
+interface SerializedG1 {
+  x: string;
+  y: string;
+}
+
+/** Serialized representation of a G2 affine point (Fp2 coordinates) */
+interface SerializedG2 {
+  x: { c0: string; c1: string };
+  y: { c0: string; c1: string };
+}
+
+export interface SerializedProof {
+  piA: SerializedG1;
+  piB: SerializedG2;
+  piC: SerializedG1;
+}
+
+function serializeG1(point: G1Point): SerializedG1 {
+  const aff = point.toAffine();
+  return { x: aff.x.toString(), y: aff.y.toString() };
+}
+
+function serializeG2(
+  point: ReturnType<typeof bn254.G2.ProjectivePoint.fromHex>
+): SerializedG2 {
+  const aff = point.toAffine();
+  const x = aff.x as unknown as { c0: bigint; c1: bigint };
+  const y = aff.y as unknown as { c0: bigint; c1: bigint };
+  return {
+    x: { c0: x.c0.toString(), c1: x.c1.toString() },
+    y: { c0: y.c0.toString(), c1: y.c1.toString() },
+  };
+}
+
+function deserializeG1(data: SerializedG1): G1Point {
+  return G1.ProjectivePoint.fromAffine({
+    x: BigInt(data.x),
+    y: BigInt(data.y),
+  });
+}
+
+function deserializeG2(
+  data: SerializedG2
+): ReturnType<typeof bn254.G2.ProjectivePoint.fromHex> {
+  const Fp2 = bn254.fields.Fp2;
+  return bn254.G2.ProjectivePoint.fromAffine({
+    x: Fp2.fromBigTuple([BigInt(data.x.c0), BigInt(data.x.c1)]),
+    y: Fp2.fromBigTuple([BigInt(data.y.c0), BigInt(data.y.c1)]),
+  });
+}
+
 /**
  * Serialize a proof to a JSON-compatible object for transmission.
  */
-export function serializeProof(proof: Proof): {
-  piA: string;
-  piB: string;
-  piC: string;
-} {
+export function serializeProof(proof: Proof): SerializedProof {
   return {
-    piA: bytesToHex(proof.piA.toRawBytes()),
-    piB: bytesToHex(proof.piB.toRawBytes()),
-    piC: bytesToHex(proof.piC.toRawBytes()),
+    piA: serializeG1(proof.piA),
+    piB: serializeG2(proof.piB),
+    piC: serializeG1(proof.piC),
   };
 }
 
 /**
  * Deserialize a proof from its JSON representation.
  */
-export function deserializeProof(data: {
-  piA: string;
-  piB: string;
-  piC: string;
-}): Proof {
+export function deserializeProof(data: SerializedProof): Proof {
   return {
-    piA: G1.ProjectivePoint.fromHex(hexToBytes(data.piA)),
-    piB: bn254.G2.ProjectivePoint.fromHex(hexToBytes(data.piB)),
-    piC: G1.ProjectivePoint.fromHex(hexToBytes(data.piC)),
+    piA: deserializeG1(data.piA),
+    piB: deserializeG2(data.piB),
+    piC: deserializeG1(data.piC),
   };
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
 }
