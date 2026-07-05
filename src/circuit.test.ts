@@ -794,3 +794,322 @@ describe("End-to-end flow", () => {
     expect(verify(verificationKey, proof, [witness[1]])).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Prover: public wires in A/B constraints (cover lines 291-292, 296-297)
+// ---------------------------------------------------------------------------
+
+describe("Prover: public wires in A/B constraints", () => {
+  it("should handle a circuit where a public wire appears in A constraint", () => {
+    // Build a custom circuit: wire1 (public) * wire2 (private) = wire3 (private)
+    // Wire 0 = constant 1, Wire 1 = public input, Wire 2 = private, Wire 3 = output (private)
+    // Constraint A selects wire 1 (public), B selects wire 2
+    const customCircuit: Circuit = {
+      numWires: 4,
+      numPublicInputs: 1,
+      numPrivateInputs: 2,
+      gates: [
+        {
+          type: "mul",
+          leftInput: 1,  // public wire in A
+          rightInput: 2,
+          output: 3,
+        },
+      ],
+    };
+
+    const r1cs = circuitToR1CS(customCircuit);
+    // wire1 = 5 (public), wire2 = 7 (private), wire3 = 35 (private)
+    const witness = [1n, 5n, 7n, 35n];
+
+    expect(verifyR1CS(r1cs, witness, FIELD_ORDER)).toBe(true);
+
+    const { provingKey, verificationKey } = trustedSetup(r1cs);
+    const proof = prove(r1cs, provingKey, witness);
+    // Verify with the public input [5n]
+    const isValid = verify(verificationKey, proof, [5n]);
+    expect(isValid).toBe(true);
+  });
+
+  it("should handle a circuit where a public wire appears in B constraint", () => {
+    // Build a custom circuit: wire2 (private) * wire1 (public) = wire3 (private)
+    // Constraint A selects wire 2, B selects wire 1 (public)
+    const customCircuit: Circuit = {
+      numWires: 4,
+      numPublicInputs: 1,
+      numPrivateInputs: 2,
+      gates: [
+        {
+          type: "mul",
+          leftInput: 2,
+          rightInput: 1,  // public wire in B
+          output: 3,
+        },
+      ],
+    };
+
+    const r1cs = circuitToR1CS(customCircuit);
+    // wire1 = 5 (public), wire2 = 7 (private), wire3 = 35 (private)
+    const witness = [1n, 5n, 7n, 35n];
+
+    expect(verifyR1CS(r1cs, witness, FIELD_ORDER)).toBe(true);
+
+    const { provingKey, verificationKey } = trustedSetup(r1cs);
+    const proof = prove(r1cs, provingKey, witness);
+    const isValid = verify(verificationKey, proof, [5n]);
+    expect(isValid).toBe(true);
+  });
+
+  it("should handle a circuit where wire 0 (constant) appears in A constraint via addition", () => {
+    // Addition gate: wire0 + wire2 = wire1
+    // A = [wire0, wire2], B = [wire0 (constant 1)], C = [wire1]
+    // This puts wire 0 in A
+    const customCircuit: Circuit = {
+      numWires: 3,
+      numPublicInputs: 1,
+      numPrivateInputs: 1,
+      gates: [
+        {
+          type: "add",
+          leftInput: 0,  // wire 0 (constant 1) in A
+          rightInput: 2,
+          output: 1,
+        },
+      ],
+    };
+
+    const r1cs = circuitToR1CS(customCircuit);
+    // wire0 = 1, wire2 = 41, wire1 = 42 (1 + 41 = 42)
+    const witness = [1n, 42n, 41n];
+
+    expect(verifyR1CS(r1cs, witness, FIELD_ORDER)).toBe(true);
+
+    const { provingKey, verificationKey } = trustedSetup(r1cs);
+    const proof = prove(r1cs, provingKey, witness);
+    const isValid = verify(verificationKey, proof, [42n]);
+    expect(isValid).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Verifier: error handling (cover lines 68-70 catch block)
+// ---------------------------------------------------------------------------
+
+describe("Verifier error handling", () => {
+  it("should return false when verify throws internally (corrupted proof)", () => {
+    const circuit = buildMultiplicationCircuit();
+    const r1cs = circuitToR1CS(circuit);
+    const witness = buildWitness(3n, 7n);
+    const { provingKey, verificationKey } = trustedSetup(r1cs);
+    const proof = prove(r1cs, provingKey, witness);
+
+    // Corrupt the verification key IC to cause an error during pairing
+    const corruptedVk = {
+      ...verificationKey,
+      ic: [], // empty IC array will cause index out of bounds
+    };
+
+    // This should trigger the catch block and return false
+    const result = verify(corruptedVk, proof, [witness[1]]);
+    expect(result).toBe(false);
+  });
+
+  it("should return false when IC has fewer points than public inputs", () => {
+    const circuit = buildMultiplicationCircuit();
+    const r1cs = circuitToR1CS(circuit);
+    const witness = buildWitness(5n, 11n);
+    const { provingKey, verificationKey } = trustedSetup(r1cs);
+    const proof = prove(r1cs, provingKey, witness);
+
+    // Provide ic with only ic[0] but no ic[1] -- accessing ic[1] will be undefined
+    const corruptedVk = {
+      ...verificationKey,
+      ic: [verificationKey.ic[0]], // only 1 entry, but we need 2
+    };
+
+    const result = verify(corruptedVk, proof, [witness[1]]);
+    expect(result).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Additional edge cases for evalSparse
+// ---------------------------------------------------------------------------
+
+describe("evalSparse edge cases", () => {
+  it("should handle negative intermediate results correctly (modular arithmetic)", () => {
+    // Large coefficient that causes intermediate overflow
+    const vec: SparseVector = [
+      [1, FIELD_ORDER - 1n],
+      [2, 1n],
+    ];
+    const witness = [1n, 2n, 1n, 0n];
+    // (FIELD_ORDER - 1) * 2 + 1 * 1 = 2*FIELD_ORDER - 2 + 1 = -1 mod FIELD_ORDER = FIELD_ORDER - 1
+    const result = evalSparse(vec, witness, FIELD_ORDER);
+    const expected = ((((FIELD_ORDER - 1n) * 2n) % FIELD_ORDER + 1n) % FIELD_ORDER + FIELD_ORDER) % FIELD_ORDER;
+    expect(result).toBe(expected);
+  });
+
+  it("should handle all-zero witness", () => {
+    const vec: SparseVector = [[0, 1n], [1, 2n]];
+    const witness = [0n, 0n, 0n, 0n];
+    expect(evalSparse(vec, witness, FIELD_ORDER)).toBe(0n);
+  });
+
+  it("should handle large sparse vector with many terms", () => {
+    const vec: SparseVector = [
+      [0, 1n],
+      [1, 2n],
+      [2, 3n],
+      [3, 4n],
+    ];
+    const witness = [1n, 1n, 1n, 1n];
+    // 1*1 + 2*1 + 3*1 + 4*1 = 10
+    expect(evalSparse(vec, witness, FIELD_ORDER)).toBe(10n);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Additional R1CS edge cases
+// ---------------------------------------------------------------------------
+
+describe("R1CS edge cases", () => {
+  it("should verify R1CS for addition circuit", () => {
+    const addCircuit: Circuit = {
+      numWires: 4,
+      numPublicInputs: 1,
+      numPrivateInputs: 2,
+      gates: [
+        { type: "add", leftInput: 2, rightInput: 3, output: 1 },
+      ],
+    };
+    const r1cs = circuitToR1CS(addCircuit);
+    // 5 + 7 = 12
+    const witness = [1n, 12n, 5n, 7n];
+    expect(verifyR1CS(r1cs, witness, FIELD_ORDER)).toBe(true);
+  });
+
+  it("should reject R1CS for incorrect addition", () => {
+    const addCircuit: Circuit = {
+      numWires: 4,
+      numPublicInputs: 1,
+      numPrivateInputs: 2,
+      gates: [
+        { type: "add", leftInput: 2, rightInput: 3, output: 1 },
+      ],
+    };
+    const r1cs = circuitToR1CS(addCircuit);
+    // 5 + 7 != 13
+    const witness = [1n, 13n, 5n, 7n];
+    expect(verifyR1CS(r1cs, witness, FIELD_ORDER)).toBe(false);
+  });
+
+  it("should handle multi-constraint R1CS verification", () => {
+    // (a + b) * c = d
+    const circuit: Circuit = {
+      numWires: 6,
+      numPublicInputs: 1,
+      numPrivateInputs: 3,
+      gates: [
+        { type: "add", leftInput: 2, rightInput: 3, output: 5 },
+        { type: "mul", leftInput: 5, rightInput: 4, output: 1 },
+      ],
+    };
+    const r1cs = circuitToR1CS(circuit);
+    const a = 3n;
+    const b = 4n;
+    const c = 5n;
+    const intermediate = Fr.add(a, b); // 7
+    const d = Fr.mul(intermediate, c); // 35
+    const witness = [1n, d, a, b, c, intermediate];
+    expect(verifyR1CS(r1cs, witness, FIELD_ORDER)).toBe(true);
+  });
+
+  it("should reject multi-constraint R1CS with wrong intermediate", () => {
+    const circuit: Circuit = {
+      numWires: 6,
+      numPublicInputs: 1,
+      numPrivateInputs: 3,
+      gates: [
+        { type: "add", leftInput: 2, rightInput: 3, output: 5 },
+        { type: "mul", leftInput: 5, rightInput: 4, output: 1 },
+      ],
+    };
+    const r1cs = circuitToR1CS(circuit);
+    // Wrong intermediate value
+    const witness = [1n, 35n, 3n, 4n, 5n, 8n]; // intermediate should be 7 not 8
+    expect(verifyR1CS(r1cs, witness, FIELD_ORDER)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Additional Prover edge cases
+// ---------------------------------------------------------------------------
+
+describe("Prover edge cases", () => {
+  it("should build witness with both inputs zero", () => {
+    const witness = buildWitness(0n, 0n);
+    expect(witness[0]).toBe(1n);
+    expect(witness[1]).toBe(0n);
+    expect(witness[2]).toBe(0n);
+    expect(witness[3]).toBe(0n);
+  });
+
+  it("should build witness for FIELD_ORDER - 1 squared", () => {
+    const a = FIELD_ORDER - 1n;
+    const witness = buildWitness(a, a);
+    // (-1) * (-1) = 1 in the field
+    expect(witness[1]).toBe(1n);
+  });
+
+  it("FIELD_ORDER constant should be the BN254 scalar field order", () => {
+    expect(FIELD_ORDER).toBe(
+      21888242871839275222246405745257275088548364400416034343698204186575808495617n
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Additional proof serialization edge cases
+// ---------------------------------------------------------------------------
+
+describe("Proof serialization edge cases", () => {
+  it("should serialize proof to valid JSON and back", () => {
+    const circuit = buildMultiplicationCircuit();
+    const r1cs = circuitToR1CS(circuit);
+    const witness = buildWitness(42n, 1337n);
+    const { provingKey } = trustedSetup(r1cs);
+    const proof = prove(r1cs, provingKey, witness);
+
+    const serialized = serializeProof(proof);
+    const json = JSON.stringify(serialized);
+    const parsed = JSON.parse(json);
+    const deserialized = deserializeProof(parsed);
+
+    expect(deserialized.piA.equals(proof.piA)).toBe(true);
+    expect(deserialized.piB.equals(proof.piB)).toBe(true);
+    expect(deserialized.piC.equals(proof.piC)).toBe(true);
+  });
+
+  it("serialized proof piB should have correct Fp2 structure", () => {
+    const circuit = buildMultiplicationCircuit();
+    const r1cs = circuitToR1CS(circuit);
+    const witness = buildWitness(7n, 11n);
+    const { provingKey } = trustedSetup(r1cs);
+    const proof = prove(r1cs, provingKey, witness);
+
+    const serialized = serializeProof(proof);
+
+    // Verify Fp2 coordinates are non-empty strings
+    expect(serialized.piB.x.c0.length).toBeGreaterThan(0);
+    expect(serialized.piB.x.c1.length).toBeGreaterThan(0);
+    expect(serialized.piB.y.c0.length).toBeGreaterThan(0);
+    expect(serialized.piB.y.c1.length).toBeGreaterThan(0);
+
+    // Verify they represent valid BigInts
+    expect(BigInt(serialized.piB.x.c0) >= 0n).toBe(true);
+    expect(BigInt(serialized.piB.x.c1) >= 0n).toBe(true);
+    expect(BigInt(serialized.piB.y.c0) >= 0n).toBe(true);
+    expect(BigInt(serialized.piB.y.c1) >= 0n).toBe(true);
+  });
+});

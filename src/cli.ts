@@ -22,7 +22,7 @@ import { bn254 } from "@noble/curves/bn254";
 
 const Fr = bn254.fields.Fr;
 
-function printUsage(): void {
+export function printUsage(): void {
   console.log(`
 Zero-Knowledge Proof CLI
 ========================
@@ -40,7 +40,7 @@ Examples:
 `);
 }
 
-function runDemo(aStr: string, bStr: string): void {
+export function runDemo(aStr: string, bStr: string): void {
   const a = BigInt(aStr);
   const b = BigInt(bStr);
   const c = Fr.mul(a, b);
@@ -124,7 +124,7 @@ function runDemo(aStr: string, bStr: string): void {
   );
 }
 
-function runProve(aStr: string, bStr: string): void {
+export function runProve(aStr: string, bStr: string): void {
   const a = BigInt(aStr);
   const b = BigInt(bStr);
   const c = Fr.mul(a, b);
@@ -146,39 +146,50 @@ function runProve(aStr: string, bStr: string): void {
   console.log(JSON.stringify(output, null, 2));
 }
 
-// Parse CLI arguments
-const args = process.argv.slice(2);
-const command = args[0];
+/** Parse CLI arguments and dispatch to the appropriate command. */
+export function main(argv: string[] = process.argv.slice(2)): void {
+  const command = argv[0];
 
-switch (command) {
-  case "demo":
-    if (args.length < 3) {
-      console.error("Usage: demo <a> <b>");
-      process.exit(1);
-    }
-    runDemo(args[1], args[2]);
-    break;
+  switch (command) {
+    case "demo":
+      if (argv.length < 3) {
+        console.error("Usage: demo <a> <b>");
+        process.exit(1);
+      }
+      runDemo(argv[1], argv[2]);
+      break;
 
-  case "prove":
-    if (args.length < 3) {
-      console.error("Usage: prove <a> <b>");
-      process.exit(1);
-    }
-    runProve(args[1], args[2]);
-    break;
+    case "prove":
+      if (argv.length < 3) {
+        console.error("Usage: prove <a> <b>");
+        process.exit(1);
+      }
+      runProve(argv[1], argv[2]);
+      break;
 
-  case "help":
-  case "--help":
-  case "-h":
-    printUsage();
-    break;
-
-  default:
-    if (args.length >= 2) {
-      // Default to demo mode if two numbers are provided
-      runDemo(args[0], args[1]);
-    } else {
+    case "help":
+    case "--help":
+    case "-h":
       printUsage();
-    }
-    break;
+      break;
+
+    default:
+      if (argv.length >= 2) {
+        // Default to demo mode if two numbers are provided
+        runDemo(argv[0], argv[1]);
+      } else {
+        printUsage();
+      }
+      break;
+  }
+}
+
+// Run when executed directly (not when imported as a module)
+const isDirectExecution =
+  typeof process !== "undefined" &&
+  process.argv[1] &&
+  (process.argv[1].endsWith("cli.ts") || process.argv[1].endsWith("cli.js"));
+
+if (isDirectExecution) {
+  main();
 }
